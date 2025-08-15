@@ -1,114 +1,76 @@
+import os
+import time
 import logging
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from config import BOT_TOKEN, MODERATOR_CHAT_ID, TARGET_CHAT_ID, CHECK_INTERVAL, INSTAGRAM_ACCOUNTS
-from instagram import get_new_posts
+import requests
+from bs4 import BeautifulSoup
+from telegram import Bot
 
-logging.basicConfig(level=logging.INFO)
+# ==== НАСТРОЙКИ ====
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # токен Telegram бота
+CHAT_ID = os.getenv("CHAT_ID")      # твой Telegram ID
+INSTAGRAM_ACCOUNTS = ["test_bot_for_niyet2"]        # без @
+CHECK_INTERVAL = 60                 # каждые X секунд
 
-processed_posts = {}
+# ==== ЛОГИ ====
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+bot = Bot(token=BOT_TOKEN)
 
+# Хранилище последних постов, чтобы не слать дубликаты
+last_posts = {}
 
-# ===== Команды =====
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Бот запущен! Следит за Instagram.")
+def get_latest_post(username):
+    url = f"https://www.instagram.com/{username}/"
+    logging.info(f"🔍 Проверка аккаунта: {username}")
 
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/115.0 Safari/537.36"
+        }
+        r = requests.get(url, headers=headers, timeout=10)
 
-async def review_post(context: ContextTypes.DEFAULT_TYPE, post):
-    keyboard = [
-        [InlineKeyboardButton("✅ Опубликовать", callback_data=f"approve|{post['id']}")],
-        [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject|{post['id']}")],
-        [InlineKeyboardButton("✏ Редактировать", callback_data=f"edit|{post['id']}")]
-    ]
-    markup = InlineKeyboardMarkup(keyboard)
+        logging.info(f"🌐 Статус-код: {r.status_code}, Размер HTML: {len(r.text)} байт")
 
-    if post["is_video"]:
-        await context.bot.send_video(
-            chat_id=MODERATOR_CHAT_ID,
-            video=post["media_url"],
-            caption=post["caption"],
-            reply_markup=markup
-        )
-    else:
-        await context.bot.send_photo(
-            chat_id=MODERATOR_CHAT_ID,
-            photo=post["media_url"],
-            caption=post["caption"],
-            reply_markup=markup
-        )
+        if len(r.text) < 5000:
+            logging.warning("⚠ Похоже, Instagram вернул заглушку или капчу. Парсинг невозможен.")
+            return None
 
-    processed_posts[post["id"]] = post
+        soup = BeautifulSoup(r.text, "html.parser")
+        script_tag = soup.find("script", text=lambda t: t and "window._sharedData" in t)
 
+        if not script_tag:
+            logging.warning("⚠ Не удалось найти данные о постах в HTML.")
+            return None
 
-# ===== Обработка кнопок =====
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    action, post_id = query.data.split("|")
-    post = processed_posts.get(post_id)
+        shared_data = script_tag.string.split(" = ", 1)[1].rstrip(";")
+        import json
+        data = json.loads(shared_data)
 
-    if not post:
-        await query.edit_message_caption(caption="❌ Пост не найден.")
-        return
+        edges = data["entry_data"]["ProfilePage"][0]["graphql"]["user"]["edge_owner_to_timeline_media"]["edges"]
 
-    if action == "approve":
-        await context.bot.send_photo(
-            chat_id=TARGET_CHAT_ID,
-            photo=post["media_url"],
-            caption=post["caption"]
-        )
-        await query.edit_message_caption(caption="✅ Пост опубликован!")
-    elif action == "reject":
-        await query.edit_message_caption(caption="🚫 Пост отклонён.")
-    elif action == "edit":
-        await query.message.reply_text(f"✏ Введите новый текст для поста {post_id}")
-        context.user_data["edit_post_id"] = post_id
+        if not edges:
+            logging.warning("⚠ Посты не найдены.")
+            return None
 
+        latest_shortcode = edges[0]["node"]["shortcode"]
+        post_url = f"https://www.instagram.com/p/{latest_shortcode}/"
 
-# ===== Редактирование текста =====
-async def edit_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    post_id = context.user_data.get("edit_post_id")
-    if not post_id:
-        return
-    new_caption = update.message.text
-    processed_posts[post_id]["caption"] = new_caption
-    await update.message.reply_text(f"✅ Текст для поста {post_id} обновлён.")
-    del context.user_data["edit_post_id"]
+        logging.info(f"✅ Найден последний пост: {post_url}")
+        return post_url
 
+    except Exception as e:
+        logging.error(f"❌ Ошибка при получении поста: {e}")
+        return None
 
-# ===== Проверка Instagram =====
-async def scheduled_check(app: Application):
-    logging.info("🔍 Проверка Instagram аккаунтов...")
-    posts = get_new_posts(INSTAGRAM_ACCOUNTS)
-
-    if not posts:
-        logging.info("❌ Новых постов нет.")
-        await app.bot.send_message(
-            chat_id=MODERATOR_CHAT_ID,
-            text="ℹ Нет новых постов в Instagram."
-        )
-        return
-
-    for post in posts:
-        await review_post(app, post)
-
-
-# ===== Запуск =====
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, edit_caption))
-
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(scheduled_check, "interval", minutes=CHECK_INTERVAL, args=[app])
-    scheduler.start()
-
-    logging.info("🚀 Бот запущен!")
-    app.run_polling()
-
+def check_accounts():
+    for username in INSTAGRAM_ACCOUNTS:
+        post_url = get_latest_post(username)
+        if post_url and last_posts.get(username) != post_url:
+            last_posts[username] = post_url
+            bot.send_message(chat_id=CHAT_ID, text=f"🆕 Новый пост в @{username}:\n{post_url}")
 
 if __name__ == "__main__":
-    main()
+    logging.info("🚀 Бот запущен!")
+    while True:
+        check_accounts()
+        time.sleep(CHECK_INTERVAL)
