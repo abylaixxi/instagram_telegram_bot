@@ -5,10 +5,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from config import BOT_TOKEN, MODERATOR_CHAT_ID, TARGET_CHAT_ID, CHECK_INTERVAL, INSTAGRAM_ACCOUNTS
 from instagram import get_new_posts
 
-# Логирование
 logging.basicConfig(level=logging.INFO)
 
-# Память для уже обработанных постов
 processed_posts = {}
 
 
@@ -18,7 +16,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def review_post(context: ContextTypes.DEFAULT_TYPE, post):
-    """Отправка поста модератору для проверки"""
     keyboard = [
         [InlineKeyboardButton("✅ Опубликовать", callback_data=f"approve|{post['id']}")],
         [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject|{post['id']}")],
@@ -82,7 +79,17 @@ async def edit_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== Проверка Instagram =====
 async def scheduled_check(app: Application):
+    logging.info("🔍 Проверка Instagram аккаунтов...")
     posts = get_new_posts(INSTAGRAM_ACCOUNTS)
+
+    if not posts:
+        logging.info("❌ Новых постов нет.")
+        await app.bot.send_message(
+            chat_id=MODERATOR_CHAT_ID,
+            text="ℹ Нет новых постов в Instagram."
+        )
+        return
+
     for post in posts:
         await review_post(app, post)
 
@@ -91,17 +98,15 @@ async def scheduled_check(app: Application):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, edit_caption))
 
-    # Планировщик
     scheduler = AsyncIOScheduler()
     scheduler.add_job(scheduled_check, "interval", minutes=CHECK_INTERVAL, args=[app])
     scheduler.start()
 
-    logging.info("Бот запущен!")
+    logging.info("🚀 Бот запущен!")
     app.run_polling()
 
 
