@@ -129,14 +129,14 @@ app_telegram.add_handler(CommandHandler("start", start))
 app_telegram.add_handler(CommandHandler("fetch", fetch_instagram_post))
 
 conv_handler = ConversationHandler(
-    entry_points=[CallbackQueryHandler(button, pattern="^edit:", per_message=True)],
+    entry_points=[CallbackQueryHandler(button, pattern="^edit:")],
     states={
         EDIT_CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_caption)]
     },
     fallbacks=[]
 )
-app_telegram.add_handler(CallbackQueryHandler(button))
 app_telegram.add_handler(conv_handler)
+
 
 # -----------------------------
 # Долгоживущий event loop для Flask
