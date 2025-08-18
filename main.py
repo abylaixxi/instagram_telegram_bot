@@ -1,84 +1,50 @@
 import os
-import time
-import requests
 import telebot
+from flask import Flask, request
+import instaloader
 
-# --- Конфиг из переменных окружения Railway ---
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")  # токен твоего Telegram-бота
-RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")      # ключ RapidAPI
-INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME")  # имя Instagram-аккаунта
-MODERATOR_CHAT_ID = int(os.getenv("MODERATOR_CHAT_ID"))  # chat_id модератора
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))    # интервал проверки в секундах
+# Загружаем токен и URL
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+APP_URL = os.getenv("APP_URL")  # https://имя-твоего-приложения.up.railway.app
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN)
+server = Flask(__name__)
 
-# Запоминаем уже опубликованные посты
-posted_ids = set()
+L = instaloader.Instaloader()
 
-def get_latest_post():
-    """Запрос к RapidAPI для получения последнего поста"""
-    url = "https://instagram-scraper-stable-api.p.rapidapi.com/ig_get_fb_profile_hover.php"
-    querystring = {"username_or_url": INSTAGRAM_USERNAME}
-    headers = {
-        "x-rapidapi-host": "instagram-scraper-stable-api.p.rapidapi.com",
-        "x-rapidapi-key": RAPIDAPI_KEY
-    }
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.reply_to(message, "Привет! Напиши username Instagram, и я попробую достать его профиль.")
 
-    response = requests.get(url, headers=headers, params=querystring)
-    if response.status_code != 200:
-        print(f"Ошибка API: {response.status_code} {response.text}")
-        return None
-
-    data = response.json()
+@bot.message_handler(func=lambda msg: True)
+def get_instagram(message):
+    username = message.text.strip()
     try:
-        # Берём первый пост из массива
-        post = data["posts"][0]
-        return {
-            "id": post["id"],
-            "caption": post.get("caption", ""),
-            "image_url": post["image_url"]
-        }
+        profile = instaloader.Profile.from_username(L.context, username)
+        reply = (
+            f"📸 Имя: {profile.full_name}\n"
+            f"📝 Биография: {profile.biography}\n"
+            f"👥 Подписчиков: {profile.followers}\n"
+            f"➡️ Ссылка: https://instagram.com/{username}"
+        )
+        bot.reply_to(message, reply)
     except Exception as e:
-        print(f"Ошибка обработки данных: {e}")
-        return None
+        bot.reply_to(message, f"Ошибка: {e}")
 
-@bot.callback_query_handler(func=lambda call: True)
-def callback_query(call):
-    """Обработка кнопок модерации"""
-    if call.data.startswith("approve_"):
-        post_id = call.data.split("_", 1)[1]
-        bot.send_message(call.message.chat.id, f"✅ Пост {post_id} одобрен и опубликован!")
-        # Здесь можно отправить пост в основной канал или чат
-    elif call.data.startswith("reject_"):
-        post_id = call.data.split("_", 1)[1]
-        bot.send_message(call.message.chat.id, f"❌ Пост {post_id} отклонён.")
+# Webhook endpoint
+@server.route(f"/{BOT_TOKEN}", methods=["POST"])
+def webhook():
+    json_str = request.get_data().decode("UTF-8")
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return "ok", 200
 
-def send_for_moderation(post):
-    """Отправка поста модератору на подтверждение"""
-    keyboard = telebot.types.InlineKeyboardMarkup()
-    approve_btn = telebot.types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{post['id']}")
-    reject_btn = telebot.types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{post['id']}")
-    keyboard.add(approve_btn, reject_btn)
-
-    bot.send_photo(
-        MODERATOR_CHAT_ID,
-        post["image_url"],
-        caption=f"Новый пост:\n{post['caption']}",
-        reply_markup=keyboard
-    )
-
-def check_new_posts():
-    """Цикл проверки Instagram на новые посты"""
-    while True:
-        post = get_latest_post()
-        if post and post["id"] not in posted_ids:
-            posted_ids.add(post["id"])
-            send_for_moderation(post)
-        time.sleep(CHECK_INTERVAL)
+# Главная страница — ставим webhook
+@server.route("/", methods=["GET"])
+def index():
+    bot.remove_webhook()
+    bot.set_webhook(url=f"{APP_URL}/{BOT_TOKEN}")
+    return "Webhook установлен!", 200
 
 if __name__ == "__main__":
-    import threading
-    # Запускаем проверку постов в отдельном потоке
-    threading.Thread(target=check_new_posts, daemon=True).start()
-    print("🚀 Бот запущен и ждёт новые посты...")
-    bot.infinity_polling()
+    server.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
