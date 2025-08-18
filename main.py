@@ -1,15 +1,14 @@
 import os
 import logging
-import asyncio
 from flask import Flask, request
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
+    MessageHandler,
     ContextTypes,
     ConversationHandler,
-    MessageHandler,
     filters
 )
 import instaloader
@@ -41,9 +40,9 @@ L = instaloader.Instaloader()
 pending_posts = {}
 
 # -----------------------------
-# Состояние редактирования
+# Состояние для ConversationHandler
 # -----------------------------
-EDIT_CAPTION = range(1)
+EDIT_CAPTION = 1
 
 # -----------------------------
 # Хэндлеры Telegram
@@ -52,13 +51,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Бот запущен!")
 
 async def fetch_instagram_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для проверки: тянет последний пост из публичного аккаунта"""
     try:
         profile = instaloader.Profile.from_username(L.context, INSTAGRAM_USER)
         post = next(profile.get_posts())
 
         caption = post.caption or "Без описания"
-        url = post.url
+        url = post.url  # прямая ссылка на изображение
 
+        # Сохраняем пост во временное хранилище
         pending_posts[str(post.mediaid)] = {"caption": caption, "url": url}
 
         keyboard = [
@@ -90,7 +91,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not post:
         await query.edit_message_caption(caption="⚠️ Пост не найден или устарел.")
-        return ConversationHandler.END
+        return
 
     if action == "approve":
         try:
@@ -105,21 +106,46 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_caption(caption="⚠️ Ошибка при публикации.")
     elif action == "reject":
         await query.edit_message_caption(caption="❌ Пост отклонён.")
+    # Редактирование теперь через ConversationHandler
     elif action == "edit":
-        context.user_data["edit_post_id"] = post_id
-        await query.edit_message_caption(caption="✏️ Отправьте новый текст для поста:")
-        return EDIT_CAPTION
+        # ConversationHandler обрабатывает редактирование
+        pass
 
-async def edit_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# -----------------------------
+# ConversationHandler для редактирования
+# -----------------------------
+async def start_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    post_id = query.data.split(":")[1]
+    context.user_data["edit_post_id"] = post_id
+    await query.edit_message_caption(caption="✏️ Отправьте новый текст для поста:")
+    return EDIT_CAPTION
+
+async def receive_edited_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     post_id = context.user_data.get("edit_post_id")
     if not post_id or post_id not in pending_posts:
         await update.message.reply_text("⚠️ Пост не найден или устарел.")
         return ConversationHandler.END
 
-    new_caption = update.message.text
-    pending_posts[post_id]["caption"] = new_caption
-    await update.message.reply_text("✅ Текст поста обновлён.")
+    # Сохраняем новый текст
+    pending_posts[post_id]["caption"] = update.message.text
+
+    # Отправляем обновлённый пост модератору
+    post = pending_posts[post_id]
+    await update.message.reply_photo(
+        photo=post["url"],
+        caption=f"✏️ Редактированный пост:\n\n{post['caption']}"
+    )
     return ConversationHandler.END
+
+conv_handler = ConversationHandler(
+    entry_points=[CallbackQueryHandler(start_edit, pattern="^edit:")],
+    states={
+        EDIT_CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_edited_caption)]
+    },
+    fallbacks=[]
+)
 
 # -----------------------------
 # Инициализация Application
@@ -127,36 +153,23 @@ async def edit_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
 app_telegram = ApplicationBuilder().token(BOT_TOKEN).build()
 app_telegram.add_handler(CommandHandler("start", start))
 app_telegram.add_handler(CommandHandler("fetch", fetch_instagram_post))
-
-conv_handler = ConversationHandler(
-    entry_points=[CallbackQueryHandler(button, pattern="^edit:")],
-    states={
-        EDIT_CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_caption)]
-    },
-    fallbacks=[]
-)
+app_telegram.add_handler(CallbackQueryHandler(button))
 app_telegram.add_handler(conv_handler)
 
-
 # -----------------------------
-# Долгоживущий event loop для Flask
+# Flask webhook
 # -----------------------------
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    loop.create_task(app_telegram.process_update(update))
+    import asyncio
+    asyncio.run(app_telegram.process_update(update))
     return "ok"
 
 @app.route("/")
 def index():
     return "Бот работает!"
 
-# -----------------------------
-# Запуск polling для локальной проверки
-# -----------------------------
 if __name__ == "__main__":
-    loop.create_task(app_telegram.run_polling())
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    import asyncio
+    asyncio.run(app_telegram.run_polling())
