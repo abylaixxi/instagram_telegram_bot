@@ -1,185 +1,100 @@
 import os
-import logging
-from flask import Flask, request
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler, 
-    MessageHandler, ContextTypes, filters, ConversationHandler
-)
-import instaloader
 import asyncio
+import instaloader
+from flask import Flask, request
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram.error import TelegramError
+from dotenv import load_dotenv
 
-# -----------------------------
-# Логирование
-# -----------------------------
-logging.basicConfig(level=logging.INFO)
+load_dotenv()
 
-# -----------------------------
-# Переменные окружения
-# -----------------------------
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")
-INSTAGRAM_USER = os.getenv("INSTAGRAM_USER")
-MODERATOR_ID = int(os.getenv("MODERATOR_ID"))
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID")  # например: "@my_channel"
+MODERATOR_ID = int(os.getenv("MODERATOR_ID"))  # ID модератора
 
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(token=TELEGRAM_TOKEN)
+loader = instaloader.Instaloader()
+
+# Хранилище постов, ожидающих модерации
+pending_posts = {}
+
 app = Flask(__name__)
 
-# -----------------------------
-# Instaloader (без логина)
-# -----------------------------
-L = instaloader.Instaloader()
 
-# -----------------------------
-# Хранилище постов
-# -----------------------------
-pending_posts = {}
-last_post_id = None  # чтобы не отправлять один и тот же пост
+async def send_post_for_moderation(post):
+    """Отправка поста модератору"""
+    caption = post.caption or ""
+    media_id = str(post.mediaid)
 
-# -----------------------------
-# Conversation states
-# -----------------------------
-EDIT_CAPTION = 1
+    # если альбом
+    if post.typename == "GraphSidecar":
+        urls = [n.display_url for n in post.get_sidecar_nodes()]
+    else:
+        urls = [post.url]
 
-# -----------------------------
-# Функция проверки Instagram
-# -----------------------------
-async def check_instagram(context: ContextTypes.DEFAULT_TYPE):
-    global last_post_id
-    try:
-        profile = instaloader.Profile.from_username(L.context, INSTAGRAM_USER)
-        post = next(profile.get_posts())  # последний пост
+    pending_posts[media_id] = {"caption": caption, "urls": urls}
 
-        if str(post.mediaid) == last_post_id:
-            return  # пост уже отправлялся, ничего не делаем
+    # Кнопки
+    keyboard = [
+        [InlineKeyboardButton("✅ Одобрить", callback_data=f"approve:{media_id}")],
+        [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{media_id}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-        last_post_id = str(post.mediaid)
-        caption = post.caption or "Без описания"
-        url = post.url
+    if len(urls) > 1:
+        media = [InputMediaPhoto(url) for url in urls]
+        media[0].caption = f"Новый пост из Instagram:\n\n{caption}"
 
-        # Сохраняем во временное хранилище
-        pending_posts[str(post.mediaid)] = {"caption": caption, "url": url}
-
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Одобрить", callback_data=f"approve:{post.mediaid}"),
-                InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{post.mediaid}"),
-                InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit:{post.mediaid}")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
+        await bot.send_media_group(chat_id=MODERATOR_ID, media=media)
+        await bot.send_message(chat_id=MODERATOR_ID, text="Выберите действие:", reply_markup=reply_markup)
+    else:
         await bot.send_photo(
             chat_id=MODERATOR_ID,
-            photo=url,
+            photo=urls[0],
             caption=f"Новый пост из Instagram:\n\n{caption}",
             reply_markup=reply_markup
         )
 
-    except Exception as e:
-        logging.error(f"Ошибка при получении поста: {e}")
 
-# -----------------------------
-# Хэндлеры Telegram
-# -----------------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Бот запущен и каждые 5 минут проверяет Instagram!")
-
-# approve/reject
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    action, post_id = query.data.split(":")
-    post = pending_posts.get(post_id)
-
-    if not post:
-        await query.edit_message_caption(caption="⚠️ Пост не найден или устарел.")
+async def publish_post(media_id):
+    """Публикация в канал"""
+    if media_id not in pending_posts:
         return
 
-    if action == "approve":
-        try:
-            await bot.send_photo(
-                chat_id=CHANNEL_ID,
-                photo=post["url"],
-                caption=post["caption"]
-            )
-            await query.edit_message_caption(caption="✅ Пост одобрен и опубликован в канал.")
-        except Exception as e:
-            logging.error(f"Ошибка при публикации: {e}")
-            await query.edit_message_caption(caption="⚠️ Ошибка при публикации.")
-    elif action == "reject":
-        await query.edit_message_caption(caption="❌ Пост отклонён.")
+    post = pending_posts.pop(media_id)
+    urls = post["urls"]
+    caption = post["caption"]
 
-# -----------------------------
-# ConversationHandler для редактирования
-# -----------------------------
-async def start_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    post_id = query.data.split(":")[1]
-    context.user_data["editing_post_id"] = post_id
-    await query.edit_message_caption(caption="✏️ Отправь новый текст для поста.")
-    return EDIT_CAPTION
+    try:
+        if len(urls) > 1:
+            media = [InputMediaPhoto(url) for url in urls]
+            media[0].caption = caption
+            await bot.send_media_group(chat_id=CHANNEL_ID, media=media)
+        else:
+            await bot.send_photo(chat_id=CHANNEL_ID, photo=urls[0], caption=caption)
+    except TelegramError as e:
+        print("Ошибка при публикации:", e)
 
-async def receive_edited_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    post_id = context.user_data.get("editing_post_id")
-    if not post_id or post_id not in pending_posts:
-        await update.message.reply_text("⚠️ Пост не найден или устарел.")
-        return ConversationHandler.END
 
-    new_caption = update.message.text
-    pending_posts[post_id]["caption"] = new_caption
-
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Одобрить", callback_data=f"approve:{post_id}"),
-            InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{post_id}"),
-            InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit:{post_id}")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await bot.send_photo(
-        chat_id=MODERATOR_ID,
-        photo=pending_posts[post_id]["url"],
-        caption=f"✏️ Отредактированный пост:\n\n{new_caption}",
-        reply_markup=reply_markup
-    )
-
-    await update.message.reply_text("✅ Текст поста обновлён и отправлен модератору.")
-    return ConversationHandler.END
-
-# -----------------------------
-# Инициализация Application
-# -----------------------------
-app_telegram = ApplicationBuilder().token(BOT_TOKEN).build()
-app_telegram.add_handler(CommandHandler("start", start))
-app_telegram.add_handler(CallbackQueryHandler(button, pattern="^(approve|reject):"))
-
-conv_handler = ConversationHandler(
-    entry_points=[CallbackQueryHandler(start_edit, pattern="^edit:")],
-    states={EDIT_CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_edited_caption)]},
-    fallbacks=[]
-)
-app_telegram.add_handler(conv_handler)
-
-# добавляем задачу каждые 5 минут
-job_queue = app_telegram.job_queue
-job_queue.run_repeating(check_instagram, interval=300, first=5)
-
-# -----------------------------
-# Flask webhook
-# -----------------------------
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+@app.route("/webhook", methods=["POST"])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    asyncio.run(app_telegram.process_update(update))
+    update = request.get_json()
+    if "callback_query" in update:
+        query = update["callback_query"]
+        data = query["data"]
+
+        if data.startswith("approve:"):
+            media_id = data.split(":")[1]
+            asyncio.run(publish_post(media_id))
+            bot.send_message(chat_id=MODERATOR_ID, text="Пост опубликован ✅")
+
+        elif data.startswith("reject:"):
+            media_id = data.split(":")[1]
+            pending_posts.pop(media_id, None)
+            bot.send_message(chat_id=MODERATOR_ID, text="Пост отклонён ❌")
+
     return "ok"
 
-@app.route("/")
-def index():
-    return "Бот работает!"
 
 if __name__ == "__main__":
-    asyncio.run(app_telegram.run_polling())
+    app.run(host="0.0.0.0", port=5000)
