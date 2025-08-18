@@ -1,42 +1,75 @@
 import os
+import json
 import telebot
-from flask import Flask, request
 import instaloader
+import time
+from flask import Flask, request
+from threading import Thread
 
-# Загружаем токен и URL
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-APP_URL = os.getenv("APP_URL")
-
-if not BOT_TOKEN:
-    raise ValueError("❌ Переменная окружения BOT_TOKEN не установлена!")
-if not APP_URL:
-    raise ValueError("❌ Переменная окружения APP_URL не установлена!")
+CHANNEL_ID = os.getenv("CHANNEL_ID")  # например: "@my_channel"
+INSTAGRAM_USER = os.getenv("INSTAGRAM_USER")  # username аккаунта, с которого берем посты
 
 bot = telebot.TeleBot(BOT_TOKEN)
 server = Flask(__name__)
-
 L = instaloader.Instaloader()
 
-@bot.message_handler(commands=['start'])
-def start(message):
-    bot.reply_to(message, "Привет! Напиши username Instagram, и я попробую достать его профиль.")
+# === Работа с JSON ===
+POSTS_FILE = "posts.json"
 
-@bot.message_handler(func=lambda msg: True)
-def get_instagram(message):
-    username = message.text.strip()
-    try:
-        profile = instaloader.Profile.from_username(L.context, username)
-        reply = (
-            f"📸 Имя: {profile.full_name}\n"
-            f"📝 Биография: {profile.biography}\n"
-            f"👥 Подписчиков: {profile.followers}\n"
-            f"➡️ Ссылка: https://instagram.com/{username}"
-        )
-        bot.reply_to(message, reply)
-    except Exception as e:
-        bot.reply_to(message, f"Ошибка: {e}")
+def load_posts():
+    if os.path.exists(POSTS_FILE):
+        with open(POSTS_FILE, "r") as f:
+            return set(json.load(f))
+    return set()
 
-# Webhook endpoint
+def save_posts(posts):
+    with open(POSTS_FILE, "w") as f:
+        json.dump(list(posts), f)
+
+posted = load_posts()
+
+# === Проверка новых постов ===
+def check_instagram():
+    while True:
+        try:
+            profile = instaloader.Profile.from_username(L.context, INSTAGRAM_USER)
+            for post in profile.get_posts():
+                if post.shortcode not in posted:
+                    text = f"📸 Новый пост у {INSTAGRAM_USER}!\n\n{post.url}"
+                    # Отправляем модератору (тебе в личку)
+                    bot.send_message(os.getenv("MODERATOR_ID"), text,
+                                     reply_markup=moderation_keyboard(post.shortcode, post.url))
+                    posted.add(post.shortcode)
+                    save_posts(posted)
+                    break  # проверяем только последний пост
+        except Exception as e:
+            print("Ошибка проверки:", e)
+        time.sleep(60)  # проверять раз в минуту
+
+# === Кнопки для модерации ===
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+def moderation_keyboard(shortcode, url):
+    kb = InlineKeyboardMarkup()
+    kb.add(
+        InlineKeyboardButton("✅ Опубликовать", callback_data=f"approve|{shortcode}|{url}"),
+        InlineKeyboardButton("❌ Пропустить", callback_data=f"skip|{shortcode}")
+    )
+    return kb
+
+@bot.callback_query_handler(func=lambda call: True)
+def callback(call):
+    action = call.data.split("|")[0]
+    shortcode = call.data.split("|")[1]
+    if action == "approve":
+        url = call.data.split("|")[2]
+        bot.send_message(CHANNEL_ID, f"📢 Новый пост!\n{url}")
+        bot.answer_callback_query(call.id, "✅ Опубликовано")
+    elif action == "skip":
+        bot.answer_callback_query(call.id, "❌ Пропущено")
+
+# === Flask webhook ===
 @server.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     json_str = request.get_data().decode("UTF-8")
@@ -44,14 +77,17 @@ def webhook():
     bot.process_new_updates([update])
     return "ok", 200
 
-# Главная страница — ставим webhook
 @server.route("/", methods=["GET"])
 def index():
     bot.remove_webhook()
-    bot.set_webhook(url=f"{APP_URL}/{BOT_TOKEN}")
+    bot.set_webhook(url=f"{os.getenv('APP_URL')}/{BOT_TOKEN}")
     return "Webhook установлен!", 200
 
+# === Фоновый поток проверки ===
+def run_checker():
+    t = Thread(target=check_instagram, daemon=True)
+    t.start()
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    print(f"🚀 Запуск на порту {port}, BOT_TOKEN начинается с {BOT_TOKEN[:5]}...")
-    server.run(host="0.0.0.0", port=port)
+    run_checker()
+    server.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
