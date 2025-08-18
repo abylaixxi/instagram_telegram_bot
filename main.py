@@ -16,29 +16,15 @@ logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 INSTAGRAM_USER = os.getenv("INSTAGRAM_USER")
-INSTAGRAM_LOGIN = os.getenv("INSTAGRAM_LOGIN")
-INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD")
 MODERATOR_ID = int(os.getenv("MODERATOR_ID"))
 
 bot = Bot(token=BOT_TOKEN)
 app = Flask(__name__)
 
 # -----------------------------
-# Instaloader
+# Instaloader (без логина)
 # -----------------------------
 L = instaloader.Instaloader()
-try:
-    # Если есть файл сессии, загрузим его
-    L.load_session_from_file(INSTAGRAM_LOGIN)
-    logging.info(f"✅ Сессия Instagram загружена")
-except FileNotFoundError:
-    # Если файла нет — пробуем логиниться
-    try:
-        L.login(INSTAGRAM_LOGIN, INSTAGRAM_PASSWORD)
-        logging.info(f"✅ Успешный вход в Instagram под {INSTAGRAM_LOGIN}")
-        L.save_session_to_file()
-    except Exception as e:
-        logging.error(f"⚠️ Ошибка входа в Instagram: {e}")
 
 # -----------------------------
 # Хранилище постов
@@ -52,13 +38,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Бот запущен!")
 
 async def fetch_instagram_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для проверки: тянет последний пост из аккаунта"""
+    """Команда для проверки: тянет последний пост из публичного аккаунта"""
     try:
         profile = instaloader.Profile.from_username(L.context, INSTAGRAM_USER)
         post = next(profile.get_posts())
-        caption = post.caption if post.caption else "Без описания"
-        url = post.url
 
+        caption = post.caption or "Без описания"
+        url = post.url  # прямая ссылка на изображение
+
+        # Сохраняем пост во временное хранилище
         pending_posts[str(post.mediaid)] = {"caption": caption, "url": url}
 
         keyboard = [
@@ -75,6 +63,7 @@ async def fetch_instagram_post(update: Update, context: ContextTypes.DEFAULT_TYP
             caption=f"Новый пост из Instagram:\n\n{caption}",
             reply_markup=reply_markup
         )
+
     except Exception as e:
         logging.error(f"Ошибка при получении поста: {e}")
         await update.message.reply_text("⚠️ Не удалось получить пост.")
