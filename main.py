@@ -2,8 +2,12 @@ import os
 import logging
 from flask import Flask, request
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters, ConversationHandler
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, CallbackQueryHandler, 
+    MessageHandler, ContextTypes, filters, ConversationHandler
+)
 import instaloader
+import asyncio
 
 # -----------------------------
 # Логирование
@@ -30,6 +34,7 @@ L = instaloader.Instaloader()
 # Хранилище постов
 # -----------------------------
 pending_posts = {}
+last_post_id = None  # чтобы не отправлять один и тот же пост
 
 # -----------------------------
 # Conversation states
@@ -37,21 +42,22 @@ pending_posts = {}
 EDIT_CAPTION = 1
 
 # -----------------------------
-# Хэндлеры Telegram
+# Функция проверки Instagram
 # -----------------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Бот запущен!")
-
-async def fetch_instagram_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для проверки: тянет последний пост из публичного аккаунта"""
+async def check_instagram(context: ContextTypes.DEFAULT_TYPE):
+    global last_post_id
     try:
         profile = instaloader.Profile.from_username(L.context, INSTAGRAM_USER)
-        post = next(profile.get_posts())
+        post = next(profile.get_posts())  # последний пост
 
+        if str(post.mediaid) == last_post_id:
+            return  # пост уже отправлялся, ничего не делаем
+
+        last_post_id = str(post.mediaid)
         caption = post.caption or "Без описания"
         url = post.url
 
-        # Сохраняем пост во временное хранилище
+        # Сохраняем во временное хранилище
         pending_posts[str(post.mediaid)] = {"caption": caption, "url": url}
 
         keyboard = [
@@ -72,8 +78,14 @@ async def fetch_instagram_post(update: Update, context: ContextTypes.DEFAULT_TYP
 
     except Exception as e:
         logging.error(f"Ошибка при получении поста: {e}")
-        await update.message.reply_text("⚠️ Не удалось получить пост.")
 
+# -----------------------------
+# Хэндлеры Telegram
+# -----------------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Бот запущен и каждые 5 минут проверяет Instagram!")
+
+# approve/reject
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -94,11 +106,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await query.edit_message_caption(caption="✅ Пост одобрен и опубликован в канал.")
         except Exception as e:
-            logging.error(f"Ошибка при одобрении поста: {e}")
+            logging.error(f"Ошибка при публикации: {e}")
             await query.edit_message_caption(caption="⚠️ Ошибка при публикации.")
     elif action == "reject":
         await query.edit_message_caption(caption="❌ Пост отклонён.")
-
 
 # -----------------------------
 # ConversationHandler для редактирования
@@ -120,7 +131,6 @@ async def receive_edited_caption(update: Update, context: ContextTypes.DEFAULT_T
     new_caption = update.message.text
     pending_posts[post_id]["caption"] = new_caption
 
-    # Отправляем обновлённый пост модератору с кнопками снова
     keyboard = [
         [
             InlineKeyboardButton("✅ Одобрить", callback_data=f"approve:{post_id}"),
@@ -137,27 +147,26 @@ async def receive_edited_caption(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=reply_markup
     )
 
-    await update.message.reply_text("✅ Текст поста обновлён и отправлен с кнопками для одобрения/отклонения.")
+    await update.message.reply_text("✅ Текст поста обновлён и отправлен модератору.")
     return ConversationHandler.END
-
 
 # -----------------------------
 # Инициализация Application
 # -----------------------------
 app_telegram = ApplicationBuilder().token(BOT_TOKEN).build()
 app_telegram.add_handler(CommandHandler("start", start))
-app_telegram.add_handler(CommandHandler("fetch", fetch_instagram_post))
 app_telegram.add_handler(CallbackQueryHandler(button, pattern="^(approve|reject):"))
 
 conv_handler = ConversationHandler(
     entry_points=[CallbackQueryHandler(start_edit, pattern="^edit:")],
-    states={
-        EDIT_CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_edited_caption)]
-    },
+    states={EDIT_CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_edited_caption)]},
     fallbacks=[]
 )
 app_telegram.add_handler(conv_handler)
 
+# добавляем задачу каждые 5 минут
+job_queue = app_telegram.job_queue
+job_queue.run_repeating(check_instagram, interval=300, first=5)
 
 # -----------------------------
 # Flask webhook
@@ -165,7 +174,6 @@ app_telegram.add_handler(conv_handler)
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    import asyncio
     asyncio.run(app_telegram.process_update(update))
     return "ok"
 
@@ -174,5 +182,4 @@ def index():
     return "Бот работает!"
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(app_telegram.run_polling())
