@@ -107,8 +107,11 @@ app_telegram.add_handler(CallbackQueryHandler(button))
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    app_telegram.update_queue.put(update)
+    # Вместо update_queue.put используем sync метод
+    import asyncio
+    asyncio.run(app_telegram.process_update(update))
     return "ok"
+
 
 @app.route("/")
 def index():
