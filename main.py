@@ -3,7 +3,15 @@ import logging
 import asyncio
 from flask import Flask, request
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, ConversationHandler, MessageHandler, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters
+)
 import instaloader
 
 # -----------------------------
@@ -33,7 +41,7 @@ L = instaloader.Instaloader()
 pending_posts = {}
 
 # -----------------------------
-# Состояние для редактирования
+# Состояние редактирования
 # -----------------------------
 EDIT_CAPTION = range(1)
 
@@ -51,7 +59,6 @@ async def fetch_instagram_post(update: Update, context: ContextTypes.DEFAULT_TYP
         caption = post.caption or "Без описания"
         url = post.url
 
-        # Сохраняем пост во временное хранилище
         pending_posts[str(post.mediaid)] = {"caption": caption, "url": url}
 
         keyboard = [
@@ -99,7 +106,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "reject":
         await query.edit_message_caption(caption="❌ Пост отклонён.")
     elif action == "edit":
-        # Запоминаем, какой пост редактируем
         context.user_data["edit_post_id"] = post_id
         await query.edit_message_caption(caption="✏️ Отправьте новый текст для поста:")
         return EDIT_CAPTION
@@ -122,9 +128,8 @@ app_telegram = ApplicationBuilder().token(BOT_TOKEN).build()
 app_telegram.add_handler(CommandHandler("start", start))
 app_telegram.add_handler(CommandHandler("fetch", fetch_instagram_post))
 
-# ConversationHandler для редактирования
 conv_handler = ConversationHandler(
-    entry_points=[CallbackQueryHandler(button, pattern="^edit:")],
+    entry_points=[CallbackQueryHandler(button, pattern="^edit:", per_message=True)],
     states={
         EDIT_CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_caption)]
     },
@@ -136,7 +141,8 @@ app_telegram.add_handler(conv_handler)
 # -----------------------------
 # Долгоживущий event loop для Flask
 # -----------------------------
-loop = asyncio.get_event_loop()
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
@@ -149,7 +155,7 @@ def index():
     return "Бот работает!"
 
 # -----------------------------
-# Запуск polling для локальной проверки (не нужен на Railway)
+# Запуск polling для локальной проверки
 # -----------------------------
 if __name__ == "__main__":
     loop.create_task(app_telegram.run_polling())
