@@ -1,102 +1,114 @@
 import os
-import telebot
-from telebot import types
-import instaloader
+import logging
 from flask import Flask, request
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Dispatcher, CommandHandler, CallbackQueryHandler, MessageHandler, Filters
+import instaloader
 
-# -----------------------------
-# Конфигурация
-# -----------------------------
-TOKEN = os.getenv("BOT_TOKEN")  # токен бота
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))  # id канала (например, -1001234567890)
-MODERATOR_ID = int(os.getenv("MODERATOR_ID"))  # id модератора
+# Логирование
+logging.basicConfig(level=logging.INFO)
 
-INSTAGRAM_USER = os.getenv("INSTAGRAM_USER")  # ник аккаунта
+# Настройки из переменных окружения Railway
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
+INSTAGRAM_USER = os.getenv("INSTAGRAM_USER")
+INSTAGRAM_LOGIN = os.getenv("INSTAGRAM_LOGIN")
+INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD")
+MODERATOR_ID = int(os.getenv("MODERATOR_ID"))
 
-bot = telebot.TeleBot(TOKEN)
+bot = Bot(token=BOT_TOKEN)
+
 app = Flask(__name__)
 
-# -----------------------------
-# Авторизация в Instagram
-# -----------------------------
+# Инициализация instaloader с логином
 L = instaloader.Instaloader()
 try:
-    # Если нужен логин/пароль, можно добавить
-    # L.login(os.getenv("INSTAGRAM_LOGIN"), os.getenv("INSTAGRAM_PASSWORD"))
-    profile = instaloader.Profile.from_username(L.context, INSTAGRAM_USER)
-    print(f"✅ Успешное подключение к профилю {INSTAGRAM_USER}")
+    L.login(INSTAGRAM_LOGIN, INSTAGRAM_PASSWORD)
+    logging.info(f"✅ Успешный вход в Instagram под {INSTAGRAM_LOGIN}")
 except Exception as e:
-    print("⚠️ Ошибка входа в Instagram:", e)
+    logging.error(f"⚠️ Ошибка входа в Instagram: {e}")
 
-# -----------------------------
-# Получение новых постов
-# -----------------------------
-def get_latest_post():
-    profile = instaloader.Profile.from_username(L.context, INSTAGRAM_USER)
-    post = next(profile.get_posts())  # самый новый пост
-    return post
+# Хранилище постов (вместо БД, можно расширить)
+pending_posts = {}
 
-# -----------------------------
-# Отправляем модератору пост
-# -----------------------------
-def send_post_for_moderation():
-    post = get_latest_post()
-    caption = post.caption if post.caption else "Без описания"
-    shortcode = post.shortcode
+def start(update, context):
+    update.message.reply_text("Бот запущен!")
 
-    markup = types.InlineKeyboardMarkup()
-    markup.add(
-        types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve|{shortcode}|{caption}"),
-        types.InlineKeyboardButton("❌ Отклонить", callback_data="reject")
-    )
+def fetch_instagram_post(update, context):
+    """Команда для проверки: тянет последний пост из аккаунта"""
+    try:
+        profile = instaloader.Profile.from_username(L.context, INSTAGRAM_USER)
+        post = next(profile.get_posts())
 
-    bot.send_message(
-        MODERATOR_ID,
-        f"📢 Новый пост из Instagram:\n\n{caption}\n\nhttps://instagram.com/p/{shortcode}/",
-        reply_markup=markup
-    )
+        caption = post.caption if post.caption else "Без описания"
+        url = post.url
 
-# -----------------------------
-# Обработка кнопок
-# -----------------------------
-@bot.callback_query_handler(func=lambda call: True)
-def callback_query(call):
-    if call.data.startswith("approve"):
+        # Сохраняем пост во временное хранилище
+        pending_posts[str(post.mediaid)] = {"caption": caption, "url": url}
+
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Одобрить", callback_data=f"approve:{post.mediaid}"),
+                InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{post.mediaid}")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        bot.send_photo(
+            chat_id=MODERATOR_ID,
+            photo=url,
+            caption=f"Новый пост из Instagram:\n\n{caption}",
+            reply_markup=reply_markup
+        )
+
+    except Exception as e:
+        logging.error(f"Ошибка при получении поста: {e}")
+        update.message.reply_text("⚠️ Не удалось получить пост.")
+
+def button(update, context):
+    query = update.callback_query
+    query.answer()
+
+    action, post_id = query.data.split(":")
+    post = pending_posts.get(post_id)
+
+    if not post:
+        query.edit_message_caption(caption="⚠️ Пост не найден или устарел.")
+        return
+
+    if action == "approve":
         try:
-            _, shortcode, caption = call.data.split("|", 2)
-            post = instaloader.Post.from_shortcode(L.context, shortcode)
-            media_url = post.url  # ссылка на фото
-
-            bot.send_photo(CHANNEL_ID, media_url, caption=f"📢 Новый пост!\n\n{caption}")
-            bot.answer_callback_query(call.id, "✅ Пост отправлен в канал")
+            bot.send_photo(
+                chat_id=CHANNEL_ID,
+                photo=post["url"],
+                caption=post["caption"]
+            )
+            query.edit_message_caption(caption="✅ Пост одобрен и опубликован в канал.")
         except Exception as e:
-            print("Ошибка при одобрении поста:", e)
-            bot.answer_callback_query(call.id, "⚠️ Ошибка при отправке поста")
-    elif call.data == "reject":
-        bot.answer_callback_query(call.id, "❌ Пост отклонён")
+            logging.error(f"Ошибка при одобрении поста: {e}")
+            query.edit_message_caption(caption="⚠️ Ошибка при публикации.")
+    elif action == "reject":
+        query.edit_message_caption(caption="❌ Пост отклонён.")
 
-# -----------------------------
-# Flask Webhook для Railway
-# -----------------------------
-@app.route(f"/{TOKEN}", methods=["POST"])
+# Flask webhook
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
-    json_str = request.get_data().decode("UTF-8")
-    update = telebot.types.Update.de_json(json_str)
-    bot.process_new_updates([update])
-    return "OK", 200
+    update = request.get_json(force=True)
+    dp.process_update(update)
+    return "ok"
 
-@app.route("/", methods=["GET"])
-def home():
-    return "Бот работает!", 200
+@app.route("/")
+def index():
+    return "Бот работает!"
 
-# -----------------------------
-# Тестовый запуск (один раз при старте)
-# -----------------------------
-with app.app_context():
-    send_post_for_moderation()
+# Настройка Telegram dispatcher
+from telegram.ext import Updater
+updater = Updater(token=BOT_TOKEN, use_context=True)
+dp = updater.dispatcher
 
-# -----------------------------
-# Запуск сервера
-# -----------------------------
+dp.add_handler(CommandHandler("start", start))
+dp.add_handler(CommandHandler("fetch", fetch_instagram_post))  # для теста
+dp.add_handler(CallbackQueryHandler(button))
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
