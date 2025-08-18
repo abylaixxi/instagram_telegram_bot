@@ -49,7 +49,7 @@ async def fetch_instagram_post(update: Update, context: ContextTypes.DEFAULT_TYP
         post = next(profile.get_posts())
 
         caption = post.caption or "Без описания"
-        url = post.url  # прямая ссылка на изображение
+        url = post.url
 
         # Сохраняем пост во временное хранилище
         pending_posts[str(post.mediaid)] = {"caption": caption, "url": url}
@@ -98,7 +98,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_caption(caption="⚠️ Ошибка при публикации.")
     elif action == "reject":
         await query.edit_message_caption(caption="❌ Пост отклонён.")
-    # 'edit' теперь обрабатывается через ConversationHandler
 
 
 # -----------------------------
@@ -121,14 +120,24 @@ async def receive_edited_caption(update: Update, context: ContextTypes.DEFAULT_T
     new_caption = update.message.text
     pending_posts[post_id]["caption"] = new_caption
 
-    # Отправляем обновлённый пост модератору
+    # Отправляем обновлённый пост модератору с кнопками снова
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Одобрить", callback_data=f"approve:{post_id}"),
+            InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{post_id}"),
+            InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit:{post_id}")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
     await bot.send_photo(
         chat_id=MODERATOR_ID,
         photo=pending_posts[post_id]["url"],
-        caption=f"✏️ Отредактированный пост:\n\n{new_caption}"
+        caption=f"✏️ Отредактированный пост:\n\n{new_caption}",
+        reply_markup=reply_markup
     )
-    await update.message.reply_text("✅ Текст поста обновлён.")
 
+    await update.message.reply_text("✅ Текст поста обновлён и отправлен с кнопками для одобрения/отклонения.")
     return ConversationHandler.END
 
 
@@ -139,6 +148,7 @@ app_telegram = ApplicationBuilder().token(BOT_TOKEN).build()
 app_telegram.add_handler(CommandHandler("start", start))
 app_telegram.add_handler(CommandHandler("fetch", fetch_instagram_post))
 app_telegram.add_handler(CallbackQueryHandler(button, pattern="^(approve|reject):"))
+
 conv_handler = ConversationHandler(
     entry_points=[CallbackQueryHandler(start_edit, pattern="^edit:")],
     states={
