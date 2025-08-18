@@ -117,8 +117,7 @@ def webhook():
 def index():
     return "Бот работает!"
 
-# -----------------------------
-# Запуск Flask
-# -----------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    import asyncio
+    asyncio.run(app_telegram.run_polling())
+
