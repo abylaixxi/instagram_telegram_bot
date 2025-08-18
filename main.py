@@ -5,7 +5,12 @@ import instaloader
 
 # Загружаем токен и URL
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-APP_URL = os.getenv("APP_URL")  # https://имя-твоего-приложения.up.railway.app
+APP_URL = os.getenv("APP_URL")
+
+if not BOT_TOKEN:
+    raise ValueError("❌ Переменная окружения BOT_TOKEN не установлена!")
+if not APP_URL:
+    raise ValueError("❌ Переменная окружения APP_URL не установлена!")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 server = Flask(__name__)
@@ -47,4 +52,6 @@ def index():
     return "Webhook установлен!", 200
 
 if __name__ == "__main__":
-    server.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    print(f"🚀 Запуск на порту {port}, BOT_TOKEN начинается с {BOT_TOKEN[:5]}...")
+    server.run(host="0.0.0.0", port=port)
