@@ -35,6 +35,25 @@ L = instaloader.Instaloader()
 # -----------------------------
 pending_posts = {}
 last_post_id = None  # чтобы не отправлять один и тот же пост
+LAST_POST_FILE = "last_post.txt"
+
+
+def load_last_post_id():
+    """Чтение ID последнего поста из файла"""
+    if os.path.exists(LAST_POST_FILE):
+        with open(LAST_POST_FILE, "r") as f:
+            return f.read().strip()
+    return None
+
+
+def save_last_post_id(post_id: str):
+    """Сохранение ID последнего поста в файл"""
+    with open(LAST_POST_FILE, "w") as f:
+        f.write(post_id)
+
+
+# при старте загружаем последний ID
+last_post_id = load_last_post_id()
 
 # -----------------------------
 # Conversation states
@@ -53,7 +72,10 @@ async def check_instagram(context: ContextTypes.DEFAULT_TYPE):
         if str(post.mediaid) == last_post_id:
             return  # пост уже отправлялся, ничего не делаем
 
+        # обновляем ID и сохраняем
         last_post_id = str(post.mediaid)
+        save_last_post_id(last_post_id)
+
         caption = post.caption or "Без описания"
         url = post.url
 
