@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from flask import Flask, request
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, ConversationHandler, MessageHandler, filters
@@ -43,13 +44,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Бот запущен!")
 
 async def fetch_instagram_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для проверки: тянет последний пост из публичного аккаунта"""
     try:
         profile = instaloader.Profile.from_username(L.context, INSTAGRAM_USER)
         post = next(profile.get_posts())
 
         caption = post.caption or "Без описания"
-        url = post.url  # прямая ссылка на изображение
+        url = post.url
 
         # Сохраняем пост во временное хранилище
         pending_posts[str(post.mediaid)] = {"caption": caption, "url": url}
@@ -122,7 +122,7 @@ app_telegram = ApplicationBuilder().token(BOT_TOKEN).build()
 app_telegram.add_handler(CommandHandler("start", start))
 app_telegram.add_handler(CommandHandler("fetch", fetch_instagram_post))
 
-# CallbackQuery + редактирование через ConversationHandler
+# ConversationHandler для редактирования
 conv_handler = ConversationHandler(
     entry_points=[CallbackQueryHandler(button, pattern="^edit:")],
     states={
@@ -134,19 +134,23 @@ app_telegram.add_handler(CallbackQueryHandler(button))
 app_telegram.add_handler(conv_handler)
 
 # -----------------------------
-# Flask webhook
+# Долгоживущий event loop для Flask
 # -----------------------------
+loop = asyncio.get_event_loop()
+
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    import asyncio
-    asyncio.run(app_telegram.process_update(update))
+    loop.create_task(app_telegram.process_update(update))
     return "ok"
 
 @app.route("/")
 def index():
     return "Бот работает!"
 
+# -----------------------------
+# Запуск polling для локальной проверки (не нужен на Railway)
+# -----------------------------
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(app_telegram.run_polling())
+    loop.create_task(app_telegram.run_polling())
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
