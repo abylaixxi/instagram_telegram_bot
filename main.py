@@ -7,7 +7,7 @@ import threading
 import time
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")
+CHANNEL_ID = os.getenv("CHANNEL_ID")  # например: -1001234567890
 MODERATOR_ID = int(os.getenv("MODERATOR_ID"))
 INSTAGRAM_USER = os.getenv("INSTAGRAM_USER")
 APP_URL = os.getenv("APP_URL")
@@ -32,15 +32,21 @@ def check_instagram():
                 last_post = latest_post.mediaid
 
                 caption = latest_post.caption if latest_post.caption else "Без описания"
-                url = f"https://instagram.com/p/{latest_post.shortcode}/"
 
                 markup = types.InlineKeyboardMarkup()
                 markup.add(
-                    types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve|{url}|{caption}"),
+                    types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve|{latest_post.shortcode}"),
                     types.InlineKeyboardButton("❌ Отклонить", callback_data="reject")
                 )
 
-                bot.send_message(MODERATOR_ID, f"Новый пост из Instagram:\n\n{caption}\n\n{url}", reply_markup=markup)
+                # показываем модератору превью + подпись
+                if latest_post.is_video:
+                    bot.send_message(MODERATOR_ID, f"Новый пост (видео):\n\n{caption}\n\nhttps://instagram.com/p/{latest_post.shortcode}/",
+                                     reply_markup=markup)
+                else:
+                    # вытаскиваем первую картинку
+                    image_url = latest_post.url
+                    bot.send_photo(MODERATOR_ID, image_url, caption=f"Новый пост:\n\n{caption}", reply_markup=markup)
 
         except Exception as e:
             print("Ошибка при проверке постов:", e)
@@ -52,9 +58,20 @@ def check_instagram():
 @bot.callback_query_handler(func=lambda call: True)
 def callback_query(call):
     if call.data.startswith("approve"):
-        _, url, caption = call.data.split("|", 2)
-        bot.send_message(CHANNEL_ID, f"📢 Новый пост!\n\n{caption}\n\n{url}")
-        bot.answer_callback_query(call.id, "✅ Пост отправлен в канал")
+        _, shortcode = call.data.split("|", 1)
+        try:
+            post = instaloader.Post.from_shortcode(L.context, shortcode)
+            caption = post.caption if post.caption else "Без описания"
+
+            if post.is_video:
+                bot.send_message(CHANNEL_ID, f"📢 Новый пост (видео)\n\n{caption}\n\nhttps://instagram.com/p/{shortcode}/")
+            else:
+                bot.send_photo(CHANNEL_ID, post.url, caption=f"📢 Новый пост!\n\n{caption}")
+
+            bot.answer_callback_query(call.id, "✅ Пост отправлен в канал")
+        except Exception as e:
+            print("Ошибка при одобрении поста:", e)
+            bot.answer_callback_query(call.id, "⚠ Ошибка при публикации")
     elif call.data == "reject":
         bot.answer_callback_query(call.id, "❌ Пост отклонён")
 
