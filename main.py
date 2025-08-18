@@ -2,13 +2,17 @@ import os
 import logging
 from flask import Flask, request
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 import instaloader
 
+# -----------------------------
 # Логирование
+# -----------------------------
 logging.basicConfig(level=logging.INFO)
 
-# Настройки из переменных окружения
+# -----------------------------
+# Переменные окружения
+# -----------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 INSTAGRAM_USER = os.getenv("INSTAGRAM_USER")
@@ -19,21 +23,36 @@ MODERATOR_ID = int(os.getenv("MODERATOR_ID"))
 bot = Bot(token=BOT_TOKEN)
 app = Flask(__name__)
 
-# Инициализация instaloader с логином
+# -----------------------------
+# Instaloader
+# -----------------------------
 L = instaloader.Instaloader()
 try:
-    L.login(INSTAGRAM_LOGIN, INSTAGRAM_PASSWORD)
-    logging.info(f"✅ Успешный вход в Instagram под {INSTAGRAM_LOGIN}")
-except Exception as e:
-    logging.error(f"⚠️ Ошибка входа в Instagram: {e}")
+    # Если есть файл сессии, загрузим его
+    L.load_session_from_file(INSTAGRAM_LOGIN)
+    logging.info(f"✅ Сессия Instagram загружена")
+except FileNotFoundError:
+    # Если файла нет — пробуем логиниться
+    try:
+        L.login(INSTAGRAM_LOGIN, INSTAGRAM_PASSWORD)
+        logging.info(f"✅ Успешный вход в Instagram под {INSTAGRAM_LOGIN}")
+        L.save_session_to_file()
+    except Exception as e:
+        logging.error(f"⚠️ Ошибка входа в Instagram: {e}")
 
+# -----------------------------
+# Хранилище постов
+# -----------------------------
 pending_posts = {}
 
-# --- Хэндлеры ---
+# -----------------------------
+# Хэндлеры Telegram
+# -----------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Бот запущен!")
 
 async def fetch_instagram_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для проверки: тянет последний пост из аккаунта"""
     try:
         profile = instaloader.Profile.from_username(L.context, INSTAGRAM_USER)
         post = next(profile.get_posts())
@@ -85,7 +104,17 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "reject":
         await query.edit_message_caption(caption="❌ Пост отклонён.")
 
-# --- Flask webhook ---
+# -----------------------------
+# Инициализация Application
+# -----------------------------
+app_telegram = ApplicationBuilder().token(BOT_TOKEN).build()
+app_telegram.add_handler(CommandHandler("start", start))
+app_telegram.add_handler(CommandHandler("fetch", fetch_instagram_post))
+app_telegram.add_handler(CallbackQueryHandler(button))
+
+# -----------------------------
+# Flask webhook
+# -----------------------------
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
@@ -96,18 +125,8 @@ def webhook():
 def index():
     return "Бот работает!"
 
-# --- Инициализация Application ---
-app_telegram = ApplicationBuilder().token(BOT_TOKEN).build()
-app_telegram.add_handler(CommandHandler("start", start))
-app_telegram.add_handler(CommandHandler("fetch", fetch_instagram_post))
-app_telegram.add_handler(CallbackQueryHandler(button))
-
-# Запуск Flask + Telegram
+# -----------------------------
+# Запуск Flask
+# -----------------------------
 if __name__ == "__main__":
-    import threading
-
-    # Запуск бота в отдельном потоке
-    threading.Thread(target=app_telegram.run_polling, daemon=True).start()
-
-    # Запуск Flask
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
